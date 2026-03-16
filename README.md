@@ -2,10 +2,11 @@
 <h3 align="center">Display near-real-time satellite imagery on your desktop.</h3>
 
 <p align = "center">
-<img src=".github/spacepaper_latest.png" width = 768>
+<img src=".github/spacepaper_latest.jpg" width = 768>
 <br>
 <i> (Click to see full-size version) </i>
 </p>
+
 
 Spacepaper generates scientifically accurate (enough) live wallpapers for your desktop, using near-real-time imagery from [RAMMB SLIDER](https://rammb-slider.cira.colostate.edu), [NASA's Moon Phase and Libration API](https://svs.gsfc.nasa.gov/5587/), [NASA SDO Sun This Week](https://svs.gsfc.nasa.gov/5577/), and [star-charter](https://github.com/dcf21/star-charter).
 
