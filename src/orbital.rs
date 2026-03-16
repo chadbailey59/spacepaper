@@ -328,7 +328,7 @@ fn select_winner(results: &[SatelliteResult], theta_limb_max: Option<f64>) -> Sa
         .satellite
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScanEntry {
     pub datetime: String,
     pub winner: Satellite,

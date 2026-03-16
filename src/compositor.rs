@@ -659,14 +659,16 @@ fn compose_inner(
     };
 
     eprintln!("Fetching sun image...");
-    let sun_img = match crate::sun::fetch_sun_image(1024) {
+    let sun_img = match crate::sun::fetch_sun_image() {
         Ok(data) => {
-            let img = decode_jpeg(&data);
+            let mut img = decode_jpeg(&data);
+            // SAFETY: we own the image and only modify pixel values, not dimensions
+crate::sun::recolor_gold(unsafe { img.buffer_mut() });
             eprintln!("Sun: {}x{}", img.width(), img.height());
             Some(img)
         }
         Err(e) => {
-            eprintln!("SDO unavailable, skipping sun: {e}");
+            eprintln!("SOHO unavailable, skipping sun: {e}");
             None
         }
     };
@@ -1113,6 +1115,101 @@ mod tests {
     }
 
     #[test]
+    fn test_render_real_composite_with_sun() -> Result<()> {
+        let scan_path = Path::new("scan_results.json");
+        if !scan_path.exists() {
+            eprintln!("No scan_results.json found — run scan_best_view test first");
+            return Ok(());
+        }
+
+        let scan = load_scan(scan_path)?;
+
+        // Find an entry where the dolly zoom actually shows the sun
+        let aspect = 1920.0 / 1080.0;
+        let mut all: Vec<&ScanEntry> = std::iter::once(&scan.best)
+            .chain(scan.entries.iter())
+            .collect();
+        all.sort_by(|a, b| a.score.partial_cmp(&b.score).unwrap());
+
+        // Take the best entry and clone it with a fake close sun position.
+        // The camera sits along +sat_dir looking back at Earth (origin).
+        // sun_dir points from Earth toward the Sun. For the sun to appear
+        // near Earth in the camera, sun_dir must be roughly opposite sat_dir
+        // (i.e. the sun is "behind" Earth from the camera's perspective),
+        // with a small offset so it peeks out to one side.
+        let mut view = all[0].clone();
+        let sd = view.sat_dir;
+        // Negate sat_dir to get the "toward camera" direction, then nudge
+        let neg = [-sd[0], -sd[1], -sd[2]];
+        // Build a perpendicular vector for the offset
+        let perp = if neg[0].abs() < 0.9 {
+            let cross = [0.0, neg[2], -neg[1]];
+            let m = (cross[0]*cross[0] + cross[1]*cross[1] + cross[2]*cross[2]).sqrt();
+            [cross[0]/m, cross[1]/m, cross[2]/m]
+        } else {
+            let cross = [neg[2], 0.0, -neg[0]];
+            let m = (cross[0]*cross[0] + cross[1]*cross[1] + cross[2]*cross[2]).sqrt();
+            [cross[0]/m, cross[1]/m, cross[2]/m]
+        };
+        // Rotate neg by ~3° toward perp so sun appears near Earth's limb
+        let angle = 0.05_f64;
+        let new_dir = [
+            neg[0] * angle.cos() + perp[0] * angle.sin(),
+            neg[1] * angle.cos() + perp[1] * angle.sin(),
+            neg[2] * angle.cos() + perp[2] * angle.sin(),
+        ];
+        let m = (new_dir[0]*new_dir[0] + new_dir[1]*new_dir[1] + new_dir[2]*new_dir[2]).sqrt();
+        view.sun_dir = [new_dir[0]/m, new_dir[1]/m, new_dir[2]/m];
+        view.sun_visible = true;
+        view.moon_visible = false;
+        // Move moon far away so sun becomes the primary companion
+        view.moon_pos = [1e9, 1e9, 1e9];
+        view.tier = crate::orbital::ViewTier::EarthSun;
+
+        let dolly = compute_dolly(&view, aspect);
+        eprintln!(
+            "Fake sun entry: show_sun={} show_moon={} fov={:.1}° sun_h={:.1} sun_v={:.1}",
+            dolly.show_sun, dolly.show_moon, dolly.fov_deg, dolly.sun_h, dolly.sun_v,
+        );
+        assert!(dolly.show_sun, "Sun should be visible with fake close position");
+
+        // Fetch sun image from SOHO
+        eprintln!("Fetching sun image...");
+        let sun_img = match crate::sun::fetch_sun_image() {
+            Ok(data) => {
+                let mut img = decode_jpeg(&data);
+                crate::sun::recolor_gold(unsafe { img.buffer_mut() });
+                eprintln!("Sun: {}x{}", img.width(), img.height());
+                Some(img)
+            }
+            Err(e) => {
+                eprintln!("SOHO unavailable, skipping: {e}");
+                return Ok(());
+            }
+        };
+
+        // Placeholder Earth disk
+        let earth_size = 1024u32;
+        let mut earth_img = Image::alloc(earth_size, earth_size).boxed();
+        let cx = earth_size as f64 / 2.0;
+        let cy = earth_size as f64 / 2.0;
+        let r = earth_size as f64 / 2.0 - 2.0;
+        draw_circle(&mut earth_img.as_mut(), cx, cy, r, COLOR_EARTH);
+        draw_circle(&mut earth_img.as_mut(), cx, cy - r * 0.7, r * 0.1, [255, 255, 255]);
+
+        let img = render_composite(&view, &earth_img, None, sun_img.as_ref(), None, 1920, 1080, false);
+
+        let out = Path::new("/tmp/spacepaper_real_composite_sun.png");
+        img.save(out);
+        eprintln!("Saved to {}", out.display());
+
+        assert_eq!(img.width(), 1920);
+        assert_eq!(img.height(), 1080);
+
+        Ok(())
+    }
+
+    #[test]
     fn test_render_real_composite() -> Result<()> {
         let scan_path = Path::new("scan_results.json");
         if !scan_path.exists() {
@@ -1134,16 +1231,17 @@ mod tests {
         let moon_img = decode_jpeg(&moon_data.data);
         eprintln!("Moon: {}x{} (frame {})", moon_img.width(), moon_img.height(), moon_data.frame);
 
-        // Fetch sun image (SDO can be unreachable)
+        // Fetch sun image (SOHO can be unreachable)
         eprintln!("Fetching sun image...");
-        let sun_img = match crate::sun::fetch_sun_image(1024) {
+        let sun_img = match crate::sun::fetch_sun_image() {
             Ok(data) => {
-                let img = decode_jpeg(&data);
+                let mut img = decode_jpeg(&data);
+                crate::sun::recolor_gold(unsafe { img.buffer_mut() });
                 eprintln!("Sun: {}x{}", img.width(), img.height());
                 Some(img)
             }
             Err(e) => {
-                eprintln!("SDO unavailable, skipping sun: {e}");
+                eprintln!("SOHO unavailable, skipping sun: {e}");
                 None
             }
         };
@@ -1236,7 +1334,7 @@ mod tests {
     fn test_compose_real() -> Result<()> {
         let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M").to_string();
         eprintln!("Composing for {now}...");
-        let img = compose(&now, 1920, 1080, None, false, None)?;
+        let img = compose(&now, 1920, 1080, None, false, None, false)?;
 
         let out = Path::new("/tmp/spacepaper_compose_real.png");
         img.save(out);
@@ -1260,7 +1358,7 @@ mod tests {
         }
 
         let bg = load_image(bg_path)?;
-        let img = compose("2026-03-15T12:00", 1920, 1080, Some(&bg), false, None)?;
+        let img = compose("2026-03-15T12:00", 1920, 1080, Some(&bg), false, None, false)?;
 
         let out = Path::new("/tmp/spacepaper_compose_starmap.png");
         img.save(out);
